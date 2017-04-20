@@ -1,22 +1,16 @@
 from unittest import TestCase
 
-from trafficsim.model import VehicleState, Vehicle, Lane, World
+from mock import MagicMock
+
+from trafficsim.model import VehicleState, Vehicle, Lane, World, VEHICLE_LENGTH
 
 
-class MockLane(Lane):
-    def __init__(self):
-        super(MockLane, self).__init__()
-
-    def add(self, vehicle):
-        pass
-
-    def remove(self, vehicle):
-        pass
+def mocklane():
+    return MagicMock(spec=Lane)
 
 
-mocklane = MockLane()
-
-mockworld = World()
+def mockworld():
+    return MagicMock(spec=World)
 
 
 class TestVehicleState(TestCase):
@@ -35,8 +29,8 @@ class TestVehicleState(TestCase):
 
 class TestVehicle(TestCase):
     def setUp(self):
-        self.mockworld = mockworld
-        self.mocklane = mocklane
+        self.mockworld = mockworld()
+        self.mocklane = mocklane()
 
     def test_get_speed_initialized_to_target_speed(self):
         veh = Vehicle(position=5, target_speed=10, lane=self.mocklane, world=self.mockworld)
@@ -64,7 +58,7 @@ class TestVehicle(TestCase):
 
     def test_set_lane_and_apply(self):
         veh = Vehicle(position=5, target_speed=10, lane=self.mocklane, world=self.mockworld)
-        another_lane = MockLane()
+        another_lane = mocklane()
         veh.lane = another_lane
         veh.apply()
         self.assertIs(veh.lane, another_lane)
@@ -78,6 +72,15 @@ class TestVehicle(TestCase):
         veh = Vehicle(position=5, target_speed=10, lane=self.mocklane, world=self.mockworld)
         veh.speed = 20
         self.assertEqual(veh.next_predicted_position(), 25)
+
+    def test_eq(self):
+        veh1 = Vehicle(position=5, target_speed=10, lane=self.mocklane, world=self.mockworld)
+        veh2 = Vehicle(position=10, target_speed=10, lane=self.mocklane, world=self.mockworld)
+        veh3 = Vehicle(position=10, target_speed=10, lane=self.mocklane, world=self.mockworld)
+
+        self.assertEqual(veh2, veh3)
+        self.assertNotEqual(veh1, veh2)
+        self.assertNotEqual(veh1, veh3)
 
     def test_cruise(self):
         veh = Vehicle(position=5, target_speed=10, lane=self.mocklane, world=self.mockworld)
@@ -98,14 +101,9 @@ class TestVehicle(TestCase):
         veh1_lane1 = Vehicle(10, 5, lane1, self.mockworld)
         veh2_lane1 = Vehicle(22, 4, lane1, self.mockworld)
         veh3_lane1 = Vehicle(99, 10, lane1, self.mockworld)
-        lane1.add(veh1_lane1)
-        lane1.add(veh2_lane1)
-        lane1.add(veh3_lane1)
 
         veh1_lane2 = Vehicle(11, 3, lane2, self.mockworld)
         veh2_lane2 = Vehicle(39, 7, lane2, self.mockworld)
-        lane2.add(veh1_lane2)
-        lane2.add(veh2_lane2)
 
         self.assertFalse(veh1_lane1._can_change_lane(lane2))
         self.assertFalse(veh1_lane2._can_change_lane(lane1))
@@ -113,10 +111,76 @@ class TestVehicle(TestCase):
         self.assertTrue(veh2_lane2._can_change_lane(lane1))
         self.assertTrue(veh3_lane1._can_change_lane(lane2))
 
+    def test_change_lane_at_speed(self):
+        lane1, lane2 = Lane(), Lane()
+        lane1.right = lane2
+        lane2.left = lane1
+
+        veh_lane1 = Vehicle(10, 5, lane1, self.mockworld)
+        veh_lane1.change_lane(lane2, 7)
+        veh_lane1.apply()
+
+        self.assertIs(veh_lane1.lane, lane2)
+        self.assertEqual(veh_lane1.speed, 7)
+
+    def test_max_speed_on_current_lane(self):
+        lane = Lane()
+        veh1 = Vehicle(10, 5, lane, self.mockworld)
+        veh2 = Vehicle(15, 1, lane, self.mockworld)
+        veh3 = Vehicle(100, 5, lane, self.mockworld)
+
+        self.assertAlmostEqual(veh1.max_speed_on(), 16 - VEHICLE_LENGTH - 10)
+        self.assertEqual(veh2.max_speed_on(), 1)
+        self.assertEqual(veh3.max_speed_on(), 5)
+
+    def test_max_speed_on_different_lane(self):
+        lane1 = Lane()
+        lane2 = Lane()
+        lane1.right = lane2
+        lane2.left = lane1
+
+        veh1 = Vehicle(10, 5, lane1, self.mockworld)
+        veh2 = Vehicle(15, 1, lane2, self.mockworld)
+        veh3 = Vehicle(100, 5, lane2, self.mockworld)
+
+        self.assertAlmostEqual(veh1.max_speed_on(lane2), 16 - VEHICLE_LENGTH - 10)
+
+    def test_calculate(self):
+        lane1, lane2 = Lane(), Lane()
+        lane1.right = lane2
+        lane2.left = lane1
+
+        veh1_lane1 = Vehicle(21, 5, lane1, self.mockworld)
+        veh2_lane1 = Vehicle(25, 4, lane1, self.mockworld)
+        veh3_lane1 = Vehicle(27, 3, lane1, self.mockworld)
+        veh4_lane1 = Vehicle(99, 6, lane1, self.mockworld)
+
+        veh1_lane2 = Vehicle(21, 3, lane2, self.mockworld)
+
+        # V4, L1 => cruises.
+        veh4_lane1.calculate()
+        self.mockworld.request_change.assert_called_with(veh4_lane1, lane1, 6)
+
+        # V3, L1 => cruises.
+        veh3_lane1.calculate()
+        self.mockworld.request_change.assert_called_with(veh3_lane1, lane1, 3)
+
+        # V2, L1 => switches lanes.
+        veh2_lane1.calculate()
+        self.mockworld.request_change.assert_called_with(veh2_lane1, lane2, 4)
+
+        # V1, L1 => must brake to maintain VEHICLE_LENGTH distance
+        veh1_lane1.calculate()
+        self.mockworld.request_change.assert_called_with(veh1_lane1, lane1, 3.2)
+
+        # V1, L2 => cruises.
+        veh1_lane2.calculate()
+        self.mockworld.request_change.assert_called_with(veh1_lane2, lane2, 3)
+
 
 class LaneTest(TestCase):
     def setUp(self):
-        self.dummyworld = mockworld
+        self.dummyworld = mockworld()
 
     def test_add_vehicle_to_lane(self):
         lane = Lane()

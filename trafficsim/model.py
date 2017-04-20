@@ -1,5 +1,8 @@
-# meters
-VEHICLE_LENGTH = 4.8
+from collections import namedtuple
+import itertools
+
+
+VEHICLE_LENGTH = 4.8  # meters
 
 
 class VehicleState(object):
@@ -25,13 +28,25 @@ def first_not_none(*args):
     return None
 
 
+def has_conflict(veh1, veh2):
+    if veh1 is None or veh2 is None:
+        return False
+    return abs(veh1.next_predicted_position() - veh2.next_predicted_position()) < VEHICLE_LENGTH
+
+
 class Vehicle(object):
     def __init__(self, position, target_speed, lane, world):
         self.target_speed = target_speed
         self._current_state = VehicleState(position, target_speed, lane)
         self._next_state = VehicleState.undefined()
-        lane.add(self)
         self._world = world
+
+        # register vehicle with lane and world.
+        self._register()
+
+    def _register(self):
+        self.lane.add(self)
+        self._world.add(self)
 
     @property
     def speed(self):
@@ -60,12 +75,19 @@ class Vehicle(object):
     def next_predicted_position(self):
         return self.position + first_not_none(self._next_state.speed, self.speed)
 
-    def cruise(self):
+    def cruise(self, at_speed=None):
+        if at_speed is not None:
+            self.speed = at_speed
         self.position = self.next_predicted_position()
+
+    def change_lane(self, lane, at_speed=None):
+        if at_speed is not None:
+            self.speed = at_speed
+        self.lane = lane
 
     def calculate(self):
         next_lane, next_speed = self._decide_lane_and_speed()
-        self._world.register_change(self, next_lane, next_speed)
+        self._world.request_change(self, next_lane, next_speed)
 
     def _vehicles_around_position(self, lane):
         return lane.first_vehicle_ahead(self.position), lane.first_vehicle_behind(self.position)
@@ -76,44 +98,38 @@ class Vehicle(object):
 
         if lane is self.lane:
             return True
-
-        lane_veh_ahead, lane_veh_behind = self._vehicles_around_position(lane)
-        this_veh_pos = self.next_predicted_position()
-
-        if lane_veh_ahead is None:
-            will_hit_vehicle_ahead = False
         else:
-            ahead_veh_pos = lane_veh_ahead.next_predicted_position()
-            will_hit_vehicle_ahead = abs(ahead_veh_pos - this_veh_pos) < VEHICLE_LENGTH
-
-        if lane_veh_behind is None:
-            behind_will_hit_you = False
-        else:
-            behind_veh_pos = lane_veh_behind.next_predicted_position()
-            behind_will_hit_you = abs(behind_veh_pos - this_veh_pos) < VEHICLE_LENGTH
-
-        return not will_hit_vehicle_ahead and not behind_will_hit_you
+            if lane.vehicle_on(self.position):
+                return False
+            lane_veh_ahead, lane_veh_behind = self._vehicles_around_position(lane)
+            return not has_conflict(self, lane_veh_ahead) and not has_conflict(self, lane_veh_behind)
 
     def _decide_lane_and_speed(self):
         speed_lanes_map = {}
         for lane in self.lane, self.lane.left, self.lane.right:
             if self._can_change_lane(lane):
-                speed_on_lane = self._max_speed_on(lane)
+                speed_on_lane = self.max_speed_on(lane)
                 if speed_on_lane not in speed_lanes_map:
                     speed_lanes_map[speed_on_lane] = []
                 speed_lanes_map[speed_on_lane].append(lane)
 
         max_speed = max(speed_lanes_map)
-        # our lane will take priority over left lane will take priority over right lane
+        # our lane will take priority over left lane, which will in turn take priority over right lane
         return speed_lanes_map[max_speed][0], max_speed
 
-    def _max_speed_on(self, lane):
+    def max_speed_on(self, lane=None):
+        if lane is None:
+            lane = self.lane
         lane_veh_ahead, _ = self._vehicles_around_position(lane)
         if lane_veh_ahead is None:
             return self.target_speed
         else:
             v_threshold = lane_veh_ahead.next_predicted_position() - self.position - VEHICLE_LENGTH
-            return min(v_threshold, self.target_speed)
+            max_speed = min(v_threshold, self.target_speed)
+            # This should never happen in our lane, but we might revisit this...
+            if max_speed < 0 and lane is self.lane:
+                raise VehicleAccident("Something is wrong with the simulation; calculated speed < 0 for our lane.")
+            return max_speed
 
     def apply(self):
         self._next_state.coalesce(self._current_state)
@@ -139,6 +155,10 @@ class Vehicle(object):
 
     def __hash__(self):
         return id(self)
+
+
+class VehicleAccident(Exception):
+    pass
 
 
 class Lane(object):
@@ -178,13 +198,59 @@ class Lane(object):
         except ValueError:
             return None
 
+    @staticmethod
+    def _almost_eq(a, b, tolerance=1E-9):
+        return abs(a - b) < tolerance
+
+    def vehicle_on(self, position):
+        return any(Lane._almost_eq(veh.position, position) for veh in self._vehicles)
+
+
+_change = namedtuple('_change', ['veh', 'lane', 'speed'])
+
 
 class World(object):
     def __init__(self):
-        pass
+        self._vehicles = []
+        self._lane_change_map = {}
 
-    def register_change(self, veh, lane, speed):
-        pass
+    def add(self, vehicle):
+        self._vehicles.append(vehicle)
 
-    def orchestrate_step(self):
-        pass
+    def request_change(self, veh, lane, speed):
+        if lane not in self._lane_change_map:
+            self._lane_change_map[lane] = []
+        self._lane_change_map[lane].append(_change(veh, lane, speed))
+
+    def _resolve_changes_for_lane(self, lane):
+        pairwise_changes = itertools.combinations(self._lane_change_map[lane], 2)
+        for change1, change2 in pairwise_changes:
+            veh1, veh2 = change1.veh, change2.veh
+            if has_conflict(veh1, veh2):
+                # prioritize vehicles that don't change lanes
+                # the other vehicle just shouldn't change lanes in that scenario
+                if change1.lane is lane:
+                    veh1.cruise(at_speed=change1.speed)
+                    veh2.cruise(at_speed=veh2.max_speed_on())
+                elif change2.lane is lane:
+                    veh2.cruise(at_speed=change2.speed)
+                    veh1.cruise(at_speed=veh1.max_speed_on())
+                else:
+                    # randomly pick to apply change to vehicle 2, leaving vehicle 1 to stay
+                    veh1.cruise(veh1.max_speed_on())
+                    veh2.change_lane(change2.lane, change2.speed)
+            else:
+                veh1.change_lane(change1.lane, change1.speed)
+                veh2.change_lane(change2.lane, change2.speed)
+
+    def _reset(self):
+        self._lane_change_map = {}
+
+    def step(self):
+        for veh in self._vehicles:
+            veh.calculate()
+        for lane in self._lane_change_map:
+            self._resolve_changes_for_lane(lane)
+        for veh in self._vehicles:
+            veh.apply()
+        self._reset()

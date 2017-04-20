@@ -2,7 +2,7 @@ from unittest import TestCase
 
 from mock import MagicMock
 
-from trafficsim.model import VehicleState, Vehicle, Lane, World, VEHICLE_LENGTH
+from trafficsim.core import VehicleState, Vehicle, Lane, World, VEHICLE_LENGTH
 
 
 def mocklane():

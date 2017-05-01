@@ -46,7 +46,6 @@ class Vehicle(object):
 
     def _register(self):
         self.lane.add(self)
-        self._world.add(self)
 
     @property
     def speed(self):
@@ -75,14 +74,14 @@ class Vehicle(object):
     def next_predicted_position(self):
         return self.position + first_not_none(self._next_state.speed, self.speed)
 
-    def cruise(self, at_speed=None):
-        if at_speed is not None:
-            self.speed = at_speed
+    def cruise(self, speed=None):
+        if speed is not None:
+            self.speed = speed
         self.position = self.next_predicted_position()
 
-    def change_lane(self, lane, at_speed=None):
-        if at_speed is not None:
-            self.speed = at_speed
+    def change_lane(self, lane, speed=None):
+        if speed is not None:
+            self.speed = speed
         self.lane = lane
 
     def calculate(self):
@@ -92,7 +91,7 @@ class Vehicle(object):
     def _vehicles_around_position(self, lane):
         return lane.first_vehicle_ahead(self.position), lane.first_vehicle_behind(self.position)
 
-    def _can_change_lane(self, lane):
+    def can_change_lane(self, lane):
         if lane is None:
             return False
 
@@ -106,8 +105,8 @@ class Vehicle(object):
 
     def _decide_lane_and_speed(self):
         speed_lanes_map = {}
-        for lane in self.lane, self.lane.left, self.lane.right:
-            if self._can_change_lane(lane):
+        for lane in self.lane, self._world.left_of(self.lane), self._world.right_of(self.lane):
+            if self.can_change_lane(lane):
                 speed_on_lane = self.max_speed_on(lane)
                 if speed_on_lane not in speed_lanes_map:
                     speed_lanes_map[speed_on_lane] = []
@@ -162,9 +161,8 @@ class VehicleAccident(Exception):
 
 
 class Lane(object):
-    def __init__(self, left=None, right=None):
-        self.left = left
-        self.right = right
+    def __init__(self, lane_number):
+        self.lane_number = lane_number
         self._vehicles = []
 
     def add(self, vehicle):
@@ -206,35 +204,52 @@ class Lane(object):
         return any(Lane._almost_eq(veh.position, position) for veh in self._vehicles)
 
 
-_change = namedtuple('_change', ['veh', 'lane', 'speed'])
-
-
 class World(object):
-    def __init__(self):
-        self._vehicles = []
-        self._lane_change_map = {}
+    _change = namedtuple('_change', ['veh', 'lane', 'speed'])
 
-    def add(self, vehicle):
-        self._vehicles.append(vehicle)
+    def __init__(self, numlanes):
+        self._lanes = [Lane(i) for i in range(numlanes)]
+
+        self._lane_change_targets = {}
+        self._reset_lane_changes()
+
+    def _reset_lane_changes(self):
+        # self._lane_change_targets = tuple([] for _ in range(len(self._lanes)))
+        self._lane_change_targets = {}
+
+    def lane(self, num):
+        try:
+            return self._lanes[num]
+        except IndexError:
+            return None
+
+    def lanes(self):
+        return tuple(self._lanes)
+
+    def left_of(self, lane):
+        return self.lane(lane.lane_number - 1)
+
+    def right_of(self, lane):
+        return self.lane(lane.lane_number + 1)
 
     def request_change(self, veh, lane, speed):
-        if lane not in self._lane_change_map:
-            self._lane_change_map[lane] = []
-        self._lane_change_map[lane].append(_change(veh, lane, speed))
+        if lane not in self._lane_change_targets:
+            self._lane_change_targets[lane] = []
+        self._lane_change_targets[lane].append(World._change(veh, lane, speed))
 
     def _resolve_changes_for_lane(self, lane):
-        pairwise_changes = itertools.combinations(self._lane_change_map[lane], 2)
+        pairwise_changes = itertools.combinations(self._lane_change_targets[lane], 2)
         for change1, change2 in pairwise_changes:
             veh1, veh2 = change1.veh, change2.veh
             if has_conflict(veh1, veh2):
                 # prioritize vehicles that don't change lanes
                 # the other vehicle just shouldn't change lanes in that scenario
                 if change1.lane is lane:
-                    veh1.cruise(at_speed=change1.speed)
-                    veh2.cruise(at_speed=veh2.max_speed_on())
+                    veh1.cruise(speed=change1.speed)
+                    veh2.cruise(speed=veh2.max_speed_on())
                 elif change2.lane is lane:
-                    veh2.cruise(at_speed=change2.speed)
-                    veh1.cruise(at_speed=veh1.max_speed_on())
+                    veh2.cruise(speed=change2.speed)
+                    veh1.cruise(speed=veh1.max_speed_on())
                 else:
                     # randomly pick to apply change to vehicle 2, leaving vehicle 1 to stay
                     veh1.cruise(veh1.max_speed_on())
@@ -243,14 +258,16 @@ class World(object):
                 veh1.change_lane(change1.lane, change1.speed)
                 veh2.change_lane(change2.lane, change2.speed)
 
-    def _reset(self):
-        self._lane_change_map = {}
-
     def step(self):
-        for veh in self._vehicles:
+        vehs = [veh for lane in self._lanes for veh in lane]
+
+        for veh in vehs:
             veh.calculate()
-        for lane in self._lane_change_map:
+
+        for lane in self._lane_change_targets:
             self._resolve_changes_for_lane(lane)
-        for veh in self._vehicles:
+
+        for veh in vehs:
             veh.apply()
-        self._reset()
+
+        self._reset_lane_changes()

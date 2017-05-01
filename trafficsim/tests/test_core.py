@@ -178,7 +178,7 @@ class TestVehicle(TestCase):
         self.mockworld.request_change.assert_called_with(veh1_lane2, lane2, 3)
 
 
-class LaneTest(TestCase):
+class TestLane(TestCase):
     def setUp(self):
         self.dummyworld = mockworld()
 
